@@ -20,6 +20,9 @@ public static class FischostSecretsExtensions
         if (string.IsNullOrWhiteSpace(options.App))
             throw new ArgumentException("FischostSecretsOptions.App is required.", nameof(configure));
 
+        if (options.StartupTimeout < options.RequestTimeout)
+            throw new ArgumentException("StartupTimeout must be at least RequestTimeout.", nameof(configure));
+
         var env = options.EnvironmentName;
         var read = options.EnvironmentReader;
         var varsSet = CredentialSelector.ReportedNames.ToDictionary(n => n, n => !string.IsNullOrWhiteSpace(read(n)));
@@ -55,14 +58,8 @@ public static class FischostSecretsExtensions
         {
             try
             {
-                var credential = CredentialSelector.Create(plan.Mode, read);
-                var clientOptions = new SecretClientOptions();
-                clientOptions.Retry.MaxRetries = options.MaxRetries;
-                clientOptions.Retry.Delay = TimeSpan.FromMilliseconds(300);
-                clientOptions.Retry.MaxDelay = TimeSpan.FromSeconds(3);
-                clientOptions.Retry.Mode = RetryMode.Exponential;
-                clientOptions.Retry.NetworkTimeout = options.RequestTimeout;
-                source = new KeyVaultSecretSource(new SecretClient(uri, credential, clientOptions));
+                var credential = options.CredentialOverride ?? CredentialSelector.Create(plan.Mode, read);
+                source = new KeyVaultSecretSource(new SecretClient(uri, credential, BuildClientOptions(options)));
             }
             catch (Exception ex)
             {
@@ -72,11 +69,25 @@ public static class FischostSecretsExtensions
 
         var entries = options.Entries.ToArray();
         var timeout = options.RequestTimeout;
-        Task<LoadBatch> Run(CancellationToken ct) => SecretsLoader.LoadAsync(entries, source, timeout, ct);
+        var startup = options.StartupTimeout;
+        Task<LoadBatch> Run(CancellationToken ct) => SecretsLoader.LoadAsync(entries, source, timeout, startup, ct);
         var batch = Task.Run(() => Run(CancellationToken.None)).GetAwaiter().GetResult();
 
         var result = new SecretsLoadResult(options.App, env, host, plan.Mode, batch.Outcomes, null, null, requiredNames, varsSet);
-        config.Add(new SecretsConfigurationSource(batch.Values, result, options.RefreshInterval is null ? null : Run, options.RefreshInterval));
+        config.Add(new SecretsConfigurationSource(batch.Values, result, options.RefreshInterval is null ? null : Run, options.RefreshInterval, options.OnRefreshProblem));
         return result;
+    }
+
+    /// <summary>The retry and timeout setup of the real client (and the test transport, when one is set).</summary>
+    internal static SecretClientOptions BuildClientOptions(FischostSecretsOptions options)
+    {
+        var clientOptions = new SecretClientOptions();
+        clientOptions.Retry.MaxRetries = options.MaxRetries;
+        clientOptions.Retry.Delay = TimeSpan.FromMilliseconds(300);
+        clientOptions.Retry.MaxDelay = TimeSpan.FromSeconds(3);
+        clientOptions.Retry.Mode = RetryMode.Exponential;
+        clientOptions.Retry.NetworkTimeout = options.RequestTimeout;
+        if (options.ClientTransport is { } t) clientOptions.Transport = t;
+        return clientOptions;
     }
 }

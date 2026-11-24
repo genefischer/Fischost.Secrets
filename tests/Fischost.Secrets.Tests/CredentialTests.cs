@@ -16,11 +16,27 @@ public class CredentialTests
     }
 
     [Fact]
-    public void Certificate_wins_over_client_secret()
+    public void Certificate_path_and_client_secret_together_are_ambiguous_and_fail_naming_both_variables()
     {
         var v = Fake.ClientSecretVars();
         v["AZURE_CLIENT_CERTIFICATE_PATH"] = "/x/c.pem";
-        Assert.Equal(CredentialMode.Certificate, Choose(v).Mode);
+        var p = Choose(v);
+        Assert.False(p.IsOk);
+        Assert.Equal(CredentialMode.None, p.Mode);
+        Assert.Contains("AZURE_CLIENT_CERTIFICATE_PATH", p.Problem);
+        Assert.Contains("AZURE_CLIENT_SECRET", p.Problem);
+        Assert.DoesNotContain("fake-client-pw", p.Problem);
+        Assert.DoesNotContain("/x/c.pem", p.Problem);
+    }
+
+    [Fact]
+    public void Certificate_password_without_a_path_is_a_partial_set_failure()
+    {
+        var p = Choose(new() { ["AZURE_CLIENT_CERTIFICATE_PASSWORD"] = "fake-pfx-pw", ["AZURE_TENANT_ID"] = "t", ["AZURE_CLIENT_ID"] = "c" });
+        Assert.False(p.IsOk);
+        Assert.Contains("AZURE_CLIENT_CERTIFICATE_PASSWORD", p.Problem);
+        Assert.Contains("AZURE_CLIENT_CERTIFICATE_PATH", p.Problem);
+        Assert.DoesNotContain("fake-pfx-pw", p.Problem);
     }
 
     [Theory]
@@ -68,9 +84,18 @@ public class CredentialTests
     }
 
     [Fact]
-    public void Client_id_alone_is_user_assigned_managed_identity()
+    public void Client_id_alone_is_not_enough_without_the_managed_identity_flag()
     {
-        Assert.Equal(CredentialMode.ManagedIdentity, Choose(new() { ["AZURE_CLIENT_ID"] = "c" }).Mode);
+        var p = Choose(new() { ["AZURE_CLIENT_ID"] = "c" });
+        Assert.False(p.IsOk);
+        Assert.Contains("FISCHOST_SECRETS_MANAGED_IDENTITY", p.Problem);
+        Assert.False(Choose(new() { ["AZURE_CLIENT_ID"] = "c", ["FISCHOST_SECRETS_MANAGED_IDENTITY"] = "0" }).IsOk);
+    }
+
+    [Fact]
+    public void Client_id_with_the_flag_is_user_assigned_managed_identity()
+    {
+        Assert.Equal(CredentialMode.ManagedIdentity, Choose(new() { ["AZURE_CLIENT_ID"] = "c", ["FISCHOST_SECRETS_MANAGED_IDENTITY"] = "1" }).Mode);
     }
 
     [Fact]

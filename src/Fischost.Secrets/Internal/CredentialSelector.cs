@@ -27,8 +27,13 @@ internal static class CredentialSelector
     public static CredentialPlan Choose(IReadOnlyDictionary<string, string?> vars, string environmentName, FischostSecretsOptions options)
     {
         bool dev = EnvironmentNames.IsDevelopment(environmentName);
-        bool t = Has(vars, Tenant), c = Has(vars, Client), s = Has(vars, Secret), p = Has(vars, CertPath);
+        bool t = Has(vars, Tenant), c = Has(vars, Client), s = Has(vars, Secret), p = Has(vars, CertPath), pw = Has(vars, CertPassword);
+        bool flag = Has(vars, SystemMi) && vars[SystemMi]!.Trim() == "1";
 
+        if (pw && !p)
+            return Partial([CertPath], CertPassword + " is set");
+        if (p && s)
+            return new(CredentialMode.None, $"ambiguous credential: both {CertPath} and {Secret} are set; keep only one");
         if (p)
         {
             var missing = new List<string>();
@@ -45,15 +50,17 @@ internal static class CredentialSelector
             return missing.Count > 0 ? Partial(missing, "some AZURE_* credential variables are set") : new(CredentialMode.ClientSecret, null);
         }
         if (c)
-            return new(CredentialMode.ManagedIdentity, null); // user-assigned, by client id
+            return flag
+                ? new(CredentialMode.ManagedIdentity, null) // user-assigned, by client id
+                : new(CredentialMode.None, $"{Client} is set alone: set {SystemMi}=1 to use it as a user-assigned managed identity, or also set {Tenant} and {Secret}");
 
         // None of the AZURE_* credential variables is set.
-        if (!dev && Has(vars, SystemMi) && vars[SystemMi]!.Trim() == "1")
-            return new(CredentialMode.ManagedIdentity, null);
+        if (flag)
+            return new(CredentialMode.ManagedIdentity, null); // system-assigned
         if (dev && options.AllowVaultInDevelopment && options.AllowDefaultAzureCredentialInDevelopment)
             return new(CredentialMode.DefaultAzure, null);
         return new(CredentialMode.None,
-            $"no credential configured: set {Tenant}, {Client} and {Secret} (or {CertPath}), or {Client} alone for a user-assigned managed identity, or {SystemMi}=1 for a system-assigned one");
+            $"no credential configured: set {Tenant}, {Client} and {Secret} (or {CertPath}), or {SystemMi}=1 for a managed identity (with {Client} for a user-assigned one)");
     }
 
     private static CredentialPlan Partial(List<string> missing, string why) =>

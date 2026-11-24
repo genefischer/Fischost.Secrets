@@ -5,7 +5,7 @@ namespace Fischost.Secrets;
 /// <summary>Which secrets one app asks for, and how. Fetch is always by exact name from this map.</summary>
 public sealed partial class FischostSecretsOptions
 {
-    [GeneratedRegex("^[0-9A-Za-z-]{1,127}$")]
+    [GeneratedRegex(@"\A[0-9A-Za-z-]{1,127}\z")]
     private static partial Regex NameRule();
 
     internal sealed record Entry(string VaultName, string ConfigKey, bool Required, string[] Alternates);
@@ -36,18 +36,40 @@ public sealed partial class FischostSecretsOptions
     /// <summary>Retries per request; clamped to 0..5.</summary>
     public int MaxRetries { get => _retries; set => _retries = Math.Clamp(value, 0, 5); }
 
-    /// <summary>Null: read once. Otherwise re-read on this interval; a failed refresh keeps the last good values.</summary>
-    public TimeSpan? RefreshInterval { get; set; }
+    private TimeSpan? _refresh;
+    private TimeSpan _startup = TimeSpan.FromSeconds(30);
 
-    /// <summary>Default: DOTNET_ENVIRONMENT, then ASPNETCORE_ENVIRONMENT, else "Production".</summary>
+    /// <summary>Null: read once. Otherwise re-read on this interval (at least 1 second); a failed refresh keeps the last good values.</summary>
+    public TimeSpan? RefreshInterval
+    {
+        get => _refresh;
+        set => _refresh = value is null || value >= TimeSpan.FromSeconds(1) ? value : throw new ArgumentOutOfRangeException(nameof(value), "RefreshInterval must be null or at least 1 second.");
+    }
+
+    /// <summary>Bounds the whole startup load (default 30 s; must be at least RequestTimeout). Entries unfinished at the deadline become Unreachable (ErrorType StartupTimeout).</summary>
+    public TimeSpan StartupTimeout
+    {
+        get => _startup;
+        set => _startup = value > TimeSpan.Zero ? value : throw new ArgumentOutOfRangeException(nameof(value));
+    }
+
+    /// <summary>Called for each secret that failed to refresh (the last good value stays in place). Exceptions from it are swallowed.</summary>
+    public Action<SecretOutcome>? OnRefreshProblem { get; set; }
+
+    /// <summary>
+    /// Default: ASPNETCORE_ENVIRONMENT, then DOTNET_ENVIRONMENT, else "Production". It counts as Development only
+    /// if every one of those variables that is set says Development; any disagreement is not Development.
+    /// Apps should pass the host's own name: <c>o.EnvironmentName = builder.Environment.EnvironmentName</c>.
+    /// </summary>
     public string EnvironmentName
     {
         get
         {
             if (_envName is not null) return _envName;
-            var e = EnvironmentReader("DOTNET_ENVIRONMENT");
-            if (string.IsNullOrWhiteSpace(e)) e = EnvironmentReader("ASPNETCORE_ENVIRONMENT");
-            return string.IsNullOrWhiteSpace(e) ? "Production" : e.Trim();
+            var set = new[] { EnvironmentReader("ASPNETCORE_ENVIRONMENT"), EnvironmentReader("DOTNET_ENVIRONMENT") }
+                .Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v!.Trim()).ToArray();
+            if (set.Length == 0) return "Production";
+            return set.FirstOrDefault(v => !EnvironmentNames.IsDevelopment(v)) ?? set[0];
         }
         set => _envName = value;
     }
@@ -57,6 +79,12 @@ public sealed partial class FischostSecretsOptions
 
     /// <summary>Test seam.</summary>
     internal ISecretSource? SecretSourceOverride { get; set; }
+
+    /// <summary>Test seam: replaces the HTTP transport of the real SecretClient.</summary>
+    internal Azure.Core.Pipeline.HttpPipelineTransport? ClientTransport { get; set; }
+
+    /// <summary>Test seam: replaces the credential of the real SecretClient.</summary>
+    internal Azure.Core.TokenCredential? CredentialOverride { get; set; }
 
     /// <summary>Edge: where environment variables are read. Tests replace it.</summary>
     internal Func<string, string?> EnvironmentReader { get; set; } = Environment.GetEnvironmentVariable;
@@ -73,15 +101,21 @@ public sealed partial class FischostSecretsOptions
             throw new ArgumentException("Config key is required.", nameof(configKey));
         alternates ??= [];
         foreach (var a in alternates) CheckName(a, nameof(alternates));
-        if (_entries.Any(e => string.Equals(e.VaultName, vaultName, StringComparison.OrdinalIgnoreCase)))
-            throw new ArgumentException($"Vault name '{vaultName}' is already in the map.", nameof(vaultName));
-        if (_entries.Any(e => string.Equals(e.ConfigKey, configKey, StringComparison.OrdinalIgnoreCase)))
+        bool Taken(string n) => _entries.Any(e => Same(e.VaultName, n) || e.Alternates.Any(x => Same(x, n)));
+        if (Taken(vaultName))
+            throw new ArgumentException($"Vault name '{vaultName}' is already in the map (as a name or an alternate).", nameof(vaultName));
+        if (_entries.Any(e => Same(e.ConfigKey, configKey)))
             throw new ArgumentException($"Config key '{configKey}' is already in the map.", nameof(configKey));
-        _entries.Add(new Entry(vaultName, configKey, required,
-            alternates.Distinct(StringComparer.OrdinalIgnoreCase)
-                .Where(a => !string.Equals(a, vaultName, StringComparison.OrdinalIgnoreCase)).ToArray()));
+        for (int i = 0; i < alternates.Length; i++)
+        {
+            if (Same(alternates[i], vaultName) || Taken(alternates[i]) || alternates.Take(i).Any(x => Same(x, alternates[i])))
+                throw new ArgumentException($"Alternate '{alternates[i]}' is already used elsewhere in the map.", nameof(alternates));
+        }
+        _entries.Add(new Entry(vaultName, configKey, required, alternates.ToArray()));
         return this;
     }
+
+    private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
     private static void CheckName(string name, string param)
     {

@@ -75,12 +75,17 @@ public class RefreshTests
     private sealed class HttpRequestExceptionLike : System.Net.Http.HttpRequestException { }
 
     [Fact]
-    public void Without_a_refresh_interval_the_source_is_a_plain_snapshot()
+    public async Task Without_a_refresh_interval_the_source_is_a_plain_snapshot()
     {
+        var current = "v1";
+        var src = new FakeSource().Custom("A", _ => Task.FromResult<string?>(current));
         var cfg = new ConfigurationManager();
-        Fake.Load(cfg, new FakeSource().Value("A", "v"), o => o.Add("A", "k"));
-        Assert.Null(Assert.Single(Provider(cfg).GetType().GetFields(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            .Where(f => f.Name == "_timer").Select(f => f.GetValue(Provider(cfg)))));
+        Fake.Load(cfg, src, o => o.Add("A", "k"));
+        Assert.False(Provider(cfg).TimerRunning);
+        current = "v2";
+        await Provider(cfg).RefreshAsync(); // nothing to re-read with
+        Assert.Equal("v1", cfg["k"]);
+        Assert.Single(src.Asked);
     }
 
     [Fact]
@@ -89,9 +94,12 @@ public class RefreshTests
         var current = "v1";
         var src = new FakeSource().Custom("A", _ => Task.FromResult<string?>(current));
         var cfg = new ConfigurationManager();
-        Fake.Load(cfg, src, o => { o.RefreshInterval = TimeSpan.FromMilliseconds(50); o.Add("A", "k"); });
+        Fake.Load(cfg, src, o => { o.RefreshInterval = TimeSpan.FromSeconds(1); o.Add("A", "k"); });
+        var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ChangeToken.OnChange(() => ((IConfiguration)cfg).GetReloadToken(), () => seen.TrySetResult());
         current = "v2";
-        for (int i = 0; i < 100 && cfg["k"] != "v2"; i++) await Task.Delay(50);
+        var done = await Task.WhenAny(seen.Task, Task.Delay(TimeSpan.FromSeconds(30)));
+        Assert.Same(seen.Task, done);
         Assert.Equal("v2", cfg["k"]);
         ((IDisposable)cfg).Dispose();
     }

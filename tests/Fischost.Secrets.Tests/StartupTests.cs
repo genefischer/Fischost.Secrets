@@ -29,14 +29,11 @@ public class StartupTests
         Assert.Equal(["App-Required"], r.RequiredMissing);
     }
 
-    [Theory]
-    [InlineData("Development")]
-    [InlineData("Staging")]
-    [InlineData("Testing")]
-    public void Outside_Production_missing_required_secrets_never_throw(string env)
+    [Fact]
+    public void Development_is_the_only_environment_that_never_throws()
     {
         var cfg = new ConfigurationManager();
-        var r = Fake.Load(cfg, new FakeSource(), o => { o.EnvironmentName = env; o.AllowVaultInDevelopment = true; o.Add("App-Required", "k", required: true); });
+        var r = Fake.Load(cfg, new FakeSource(), o => { o.EnvironmentName = "Development"; o.AllowVaultInDevelopment = true; o.Add("App-Required", "k", required: true); });
         r.ThrowIfRequiredProblems(); // no exception
         Assert.Equal(["App-Required"], r.RequiredMissing);
     }
@@ -45,9 +42,67 @@ public class StartupTests
     [InlineData("Production")]
     [InlineData("production")]
     [InlineData("PRODUCTION")]
-    public void Production_matches_case_insensitively(string env)
+    [InlineData("Staging")]
+    [InlineData("Testing")]
+    [InlineData("Prod")]
+    [InlineData("Live")]
+    [InlineData("UAT")]
+    [InlineData("SomethingUnknown")]
+    public void Every_environment_except_Development_throws_on_a_missing_required_secret(string env)
     {
         var r = Fake.Load(new ConfigurationManager(), new FakeSource(), o => { o.EnvironmentName = env; o.Add("A", "k", required: true); });
+        Assert.Throws<FischostSecretsException>(r.ThrowIfRequiredProblems);
+    }
+
+    private static Func<string, string?> Env(string? aspnet, string? dotnet) => n => n switch
+    {
+        "ASPNETCORE_ENVIRONMENT" => aspnet,
+        "DOTNET_ENVIRONMENT" => dotnet,
+        _ => null,
+    };
+
+    [Theory]
+    [InlineData(null, null, "Production")]
+    [InlineData("Staging", null, "Staging")]
+    [InlineData(null, "Staging", "Staging")]
+    [InlineData("Staging", "Development", "Staging")]
+    [InlineData("Development", "Staging", "Staging")]
+    [InlineData("Development", "Production", "Production")]
+    [InlineData("Development", "Development", "Development")]
+    [InlineData("development", null, "development")]
+    [InlineData(null, "Development", "Development")]
+    [InlineData("  ", "Development", "Development")]
+    public void Environment_is_Development_only_when_every_set_variable_says_so(string? aspnet, string? dotnet, string expected)
+    {
+        var o = new FischostSecretsOptions { EnvironmentReader = Env(aspnet, dotnet) };
+        Assert.Equal(expected, o.EnvironmentName);
+    }
+
+    [Fact]
+    public void Aspnet_variable_wins_over_dotnet_variable_when_both_name_non_Development_environments()
+    {
+        var o = new FischostSecretsOptions { EnvironmentReader = Env("Staging", "Production") };
+        Assert.Equal("Staging", o.EnvironmentName);
+    }
+
+    [Fact]
+    public void Disagreeing_variables_use_the_vault_and_enforce_the_throw_rule()
+    {
+        var src = new FakeSource();
+        var r = Fake.Load(new ConfigurationManager(), src, o =>
+        {
+            o.EnvironmentName = null!; // fall back to the variables
+            o.EnvironmentReader = n => n switch
+            {
+                "ASPNETCORE_ENVIRONMENT" => "Development",
+                "DOTNET_ENVIRONMENT" => "Production",
+                "AZURE_TENANT_ID" => "t", "AZURE_CLIENT_ID" => "c", "AZURE_CLIENT_SECRET" => "s",
+                _ => null,
+            };
+            o.Add("A", "k", required: true);
+        });
+        Assert.False(r.Skipped);
+        Assert.Equal(["A"], src.Asked);
         Assert.Throws<FischostSecretsException>(r.ThrowIfRequiredProblems);
     }
 
@@ -120,26 +175,24 @@ public class StartupTests
     }
 
     [Fact]
-    public void No_vault_url_outside_Production_is_skipped_without_throwing()
+    public void No_vault_url_is_skipped_and_throws_only_outside_Development()
     {
-        var r = Fake.Load(new ConfigurationManager(), null, o => { o.VaultUrl = null; o.EnvironmentReader = _ => null; o.EnvironmentName = "Staging"; o.Add("A", "k", required: true); });
-        Assert.Equal("no vault url", r.SkipReason);
-        r.ThrowIfRequiredProblems();
+        var staging = Fake.Load(new ConfigurationManager(), null, o => { o.VaultUrl = null; o.EnvironmentReader = _ => null; o.EnvironmentName = "Staging"; o.Add("A", "k", required: true); });
+        Assert.Equal("no vault url", staging.SkipReason);
+        Assert.Throws<FischostSecretsException>(staging.ThrowIfRequiredProblems);
+
+        var dev = Fake.Load(new ConfigurationManager(), null, o => { o.VaultUrl = null; o.EnvironmentReader = _ => null; o.EnvironmentName = "Development"; o.AllowVaultInDevelopment = true; o.Add("A", "k", required: true); });
+        Assert.Equal("no vault url", dev.SkipReason);
+        dev.ThrowIfRequiredProblems();
     }
 
     [Fact]
-    public void Vault_url_defaults_to_KEYVAULT_URL_and_environment_to_DOTNET_ENVIRONMENT()
+    public void Vault_url_defaults_to_KEYVAULT_URL()
     {
         var vars = Fake.ClientSecretVars();
         vars["KEYVAULT_URL"] = Fake.VaultUrl;
-        vars["DOTNET_ENVIRONMENT"] = "Staging";
         var o = new FischostSecretsOptions { EnvironmentReader = Fake.Reader(vars) };
         Assert.Equal(Fake.VaultUrl, o.VaultUrl);
-        Assert.Equal("Staging", o.EnvironmentName);
-        vars.Remove("DOTNET_ENVIRONMENT"); vars["ASPNETCORE_ENVIRONMENT"] = "Development";
-        Assert.Equal("Development", o.EnvironmentName);
-        vars.Remove("ASPNETCORE_ENVIRONMENT");
-        Assert.Equal("Production", o.EnvironmentName);
     }
 
     [Fact]

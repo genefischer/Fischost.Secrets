@@ -2,6 +2,7 @@
 
 namespace Fischost.Secrets.Tests;
 
+[Collection("Legacy")]
 public class LegacyTests
 {
     [Fact]

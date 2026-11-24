@@ -70,6 +70,9 @@ public class SafetyAndOptionsTests
     [InlineData("a?api-version=1")]
     [InlineData("a%2Fb")]
     [InlineData("..")]
+    [InlineData("Good-Name\n")]
+    [InlineData("\nGood-Name")]
+    [InlineData("Good-Name\r\n")]
     public void Bad_vault_names_are_rejected(string name)
     {
         Assert.Throws<ArgumentException>(() => new FischostSecretsOptions().Add(name, "k"));

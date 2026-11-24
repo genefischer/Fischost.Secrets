@@ -7,6 +7,7 @@ namespace Fischost.Secrets;
 internal sealed class SecretFetch
 {
     public SecretFetch(string? value) => Value = value;
+    [System.Diagnostics.DebuggerBrowsable(System.Diagnostics.DebuggerBrowsableState.Never)]
     public string? Value { get; }
     public override string ToString() => nameof(SecretFetch);
 }

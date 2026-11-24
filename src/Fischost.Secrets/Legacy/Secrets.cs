@@ -76,9 +76,12 @@ namespace Fischost.Secrets
                 var resp = _client!.GetSecret(name);
                 return resp.Value.Value;
             }
-            catch (Azure.RequestFailedException ex) when (ex.Status == 404)
+            catch (Azure.RequestFailedException ex)
             {
-                throw new InvalidOperationException($"Secret '{name}' not found in Key Vault {_vaultUrl}.", ex);
+                // Name and status only: no vault URL, no inner exception (its message can carry the URL).
+                throw new InvalidOperationException(ex.Status == 404
+                    ? $"Secret '{name}' not found in Key Vault (HTTP 404)."
+                    : $"Secret '{name}' could not be read from Key Vault (HTTP {ex.Status}).");
             }
         }
 
@@ -110,12 +113,24 @@ namespace Fischost.Secrets
         /// </summary>
         public static void DumpDiagnostics(Action<string> writeLine)
         {
-            writeLine($"Vault URL: {_vaultUrl ?? "(not set)"}");
+            writeLine($"Vault host: {HostOf(_vaultUrl)}");
             writeLine($"Auth mode: {_authMode}");
             writeLine("Env present: " +
                       $"AZURE_TENANT_ID={(EnvSet("AZURE_TENANT_ID") ? "Y" : "N")}, " +
                       $"AZURE_CLIENT_ID={(EnvSet("AZURE_CLIENT_ID") ? "Y" : "N")}, " +
                       $"AZURE_CLIENT_SECRET={(EnvSet("AZURE_CLIENT_SECRET") ? "Y" : "N")}");
+        }
+
+        private static string HostOf(string? url) =>
+            string.IsNullOrWhiteSpace(url) ? "(not set)"
+            : Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "(unparseable)";
+
+        /// <summary>Test seam: sets or clears the static state without any credential.</summary>
+        internal static void SetForTests(SecretClient? client, string? vaultUrl)
+        {
+            _client = client;
+            _vaultUrl = vaultUrl;
+            _authMode = client is null ? "Uninitialized" : "Test";
         }
 
         private static bool EnvSet(string n) => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(n));

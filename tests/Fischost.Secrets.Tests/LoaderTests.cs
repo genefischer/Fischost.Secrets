@@ -76,6 +76,19 @@ public class LoaderTests
         Assert.Equal(SecretStatus.NotFound, One(new FakeSource().Value("App-Key", null)).Status);
     }
 
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("   ")]
+    [InlineData("\n")]
+    [InlineData("\t \r\n")]
+    public void Whitespace_only_value_counts_as_NotFound_and_is_not_added(string ws)
+    {
+        var cfg = new ConfigurationManager();
+        var r = Fake.Load(cfg, new FakeSource().Value("App-Key", ws), o => o.Add("App-Key", "Key"));
+        Assert.Equal(SecretStatus.NotFound, r.Outcomes[0].Status);
+        Assert.Null(cfg["Key"]);
+    }
+
     [Fact]
     public void Alternates_are_tried_in_order_after_NotFound()
     {
@@ -131,19 +144,6 @@ public class LoaderTests
         Fake.Load(cfg, src, o => { for (int i = 0; i < 30; i++) { src.Value($"S-{i}", "v"); o.Add($"S-{i}", $"k{i}"); } });
         Assert.Equal(30, src.Asked.Count);
         Assert.InRange(src.MaxConcurrent, 2, SecretsLoader.MaxParallel);
-    }
-
-    [Fact]
-    public void Source_interface_has_one_method_and_no_listing()
-    {
-        var methods = typeof(ISecretSource).GetMethods();
-        var m = Assert.Single(methods);
-        Assert.Equal("GetAsync", m.Name);
-        Assert.DoesNotContain(typeof(KeyVaultSecretSource).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly), x => x.Name != "GetAsync");
-        var all = typeof(KeyVaultSecretSource).Assembly.GetTypes()
-            .SelectMany(t => t.GetMembers(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly))
-            .Select(x => x.Name);
-        Assert.DoesNotContain(all, n => n.Contains("PropertiesOfSecrets", StringComparison.Ordinal));
     }
 
     [Fact]

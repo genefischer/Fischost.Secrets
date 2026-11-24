@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Sockets;
 using Azure;
@@ -5,7 +6,11 @@ using Azure.Identity;
 
 namespace Fischost.Secrets;
 
-internal sealed record LoadBatch(IReadOnlyList<SecretOutcome> Outcomes, Dictionary<string, string> Values);
+internal sealed record LoadBatch(IReadOnlyList<SecretOutcome> Outcomes, [property: DebuggerBrowsable(DebuggerBrowsableState.Never)] Dictionary<string, string> Values)
+{
+    // The default record ToString would print members; keep values out of every text form.
+    public override string ToString() => $"{nameof(LoadBatch)}({Outcomes.Count} outcomes, {Values.Count} values)";
+}
 
 /// <summary>Fetches each map entry by exact name. One failing entry never stops the others.</summary>
 internal static class SecretsLoader
@@ -13,23 +18,44 @@ internal static class SecretsLoader
     public const int MaxParallel = 8;
 
     public static async Task<LoadBatch> LoadAsync(
-        IReadOnlyList<FischostSecretsOptions.Entry> entries, ISecretSource source, TimeSpan timeout, CancellationToken ct)
+        IReadOnlyList<FischostSecretsOptions.Entry> entries, ISecretSource source, TimeSpan timeout, TimeSpan startupTimeout, CancellationToken ct)
     {
-        using var gate = new SemaphoreSlim(MaxParallel);
+        // Not disposed on purpose: entries abandoned at the deadline may still touch it.
+        var gate = new SemaphoreSlim(MaxParallel);
+        using var deadlineCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var token = deadlineCts.Token;
         var tasks = entries.Select(async e =>
         {
-            await gate.WaitAsync(ct).ConfigureAwait(false);
-            try { return await LoadOneAsync(e, source, timeout, ct).ConfigureAwait(false); }
+            await gate.WaitAsync(token).ConfigureAwait(false);
+            try { return await LoadOneAsync(e, source, timeout, token).ConfigureAwait(false); }
             finally { gate.Release(); }
         }).ToArray();
-        var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        var all = Task.WhenAll(tasks);
+        using (var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            var winner = await Task.WhenAny(all, Task.Delay(startupTimeout, delayCts.Token)).ConfigureAwait(false);
+            delayCts.Cancel();
+            if (winner != all) deadlineCts.Cancel(); // stop cooperative stragglers
+        }
+        ct.ThrowIfCancellationRequested();
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var outcomes = new List<SecretOutcome>(results.Length);
-        foreach (var (outcome, value) in results)
+        var outcomes = new List<SecretOutcome>(entries.Count);
+        for (int i = 0; i < tasks.Length; i++)
         {
-            outcomes.Add(outcome);
-            if (value is not null) values[outcome.ConfigKey] = value;
+            var e = entries[i];
+            if (tasks[i].IsCompletedSuccessfully)
+            {
+                var (outcome, value) = tasks[i].Result;
+                outcomes.Add(outcome);
+                if (value is not null) values[outcome.ConfigKey] = value;
+            }
+            else
+            {
+                _ = tasks[i].ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                outcomes.Add(new SecretOutcome(e.VaultName, null, e.ConfigKey, SecretStatus.Unreachable, e.Required, null, "StartupTimeout"));
+            }
         }
         return new LoadBatch(outcomes, values);
     }
@@ -55,7 +81,10 @@ internal static class SecretsLoader
         return (new SecretOutcome(e.VaultName, null, e.ConfigKey, failure.Status, e.Required, failure.Http, failure.ErrorType), null);
     }
 
-    private sealed record Attempt(SecretStatus Status, string? Value, int? Http, string? ErrorType);
+    internal sealed record Attempt(SecretStatus Status, [property: DebuggerBrowsable(DebuggerBrowsableState.Never)] string? Value, int? Http, string? ErrorType)
+    {
+        public override string ToString() => $"{nameof(Attempt)}({Status})";
+    }
 
     private static async Task<Attempt> TryFetchAsync(ISecretSource source, string name, TimeSpan timeout, CancellationToken ct)
     {
@@ -63,8 +92,20 @@ internal static class SecretsLoader
         cts.CancelAfter(timeout);
         try
         {
-            var f = await source.GetAsync(name, cts.Token).ConfigureAwait(false);
-            return string.IsNullOrEmpty(f.Value)
+            var call = source.GetAsync(name, cts.Token);
+            using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var winner = await Task.WhenAny(call, Task.Delay(timeout, delayCts.Token)).ConfigureAwait(false);
+            if (winner != call)
+            {
+                // A source that ignores its token must not hold the app up.
+                cts.Cancel();
+                _ = call.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                ct.ThrowIfCancellationRequested();
+                return new Attempt(SecretStatus.Unreachable, null, null, "Timeout");
+            }
+            delayCts.Cancel();
+            var f = await call.ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(f.Value)
                 ? new Attempt(SecretStatus.NotFound, null, null, null)
                 : new Attempt(SecretStatus.Loaded, f.Value, null, null);
         }

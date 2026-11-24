@@ -54,12 +54,12 @@ public sealed class SecretsLoadResult
             : Outcomes.Where(o => o.Required && o.Status != SecretStatus.Loaded).Select(o => (o.VaultName, o.Status.ToString()));
 
     /// <summary>
-    /// Throws when a required secret is not loaded, but only in Production. Other environments never throw.
+    /// Throws when a required secret is not loaded, in every environment except Development.
     /// Call after <see cref="Report"/> so the log has the details first.
     /// </summary>
     public void ThrowIfRequiredProblems()
     {
-        if (!EnvironmentNames.IsProduction(EnvironmentName)) return;
+        if (EnvironmentNames.IsDevelopment(EnvironmentName)) return; // only Development is exempt
         var problems = RequiredProblems().ToList();
         if (problems.Count == 0) return;
         var msg = $"{App}: required secrets not loaded: " + string.Join(", ", problems.Select(p => $"{p.Name} ({p.Why})"));

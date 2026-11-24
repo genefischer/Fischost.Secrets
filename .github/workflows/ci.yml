@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-pack:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    env:
+      DOTNET_NOLOGO: 1
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build Fischost.Secrets.slnx -c Release -p:VersionSuffix=ci.${{ github.run_number }}
+
+      - name: Test
+        run: dotnet test Fischost.Secrets.slnx -c Release --no-build --logger "trx" --results-directory TestResults
+
+      - name: Pack
+        run: dotnet pack Fischost.Secrets.slnx -c Release --no-build -p:VersionSuffix=ci.${{ github.run_number }}
+
+      - name: Consumer install (Linux)
+        if: runner.os == 'Linux'
+        run: bash tools/consumer-test.sh "2.0.0-ci.${{ github.run_number }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.os }}
+          path: |
+            TestResults/
+            artifacts/packages/
+          if-no-files-found: ignore

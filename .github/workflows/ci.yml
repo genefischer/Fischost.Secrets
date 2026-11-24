@@ -28,7 +28,7 @@ jobs:
           global-json-file: global.json
 
       - name: Build
-        run: dotnet build Fischost.Secrets.slnx -c Release
+        run: dotnet build Fischost.Secrets.slnx -c Release -p:VersionSuffix=ci.${{ github.run_number }}
 
       - name: Test
         run: dotnet test Fischost.Secrets.slnx -c Release --no-build --logger "trx" --results-directory TestResults

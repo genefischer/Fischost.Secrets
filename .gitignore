@@ -361,3 +361,11 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Fischost.Secrets v2
+artifacts/
+*.pfx
+*.pem
+*.key
+.env
+.env.local

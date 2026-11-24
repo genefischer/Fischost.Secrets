@@ -1,0 +1,4 @@
+Copyright (c) 2026 Fischost Solutions. All rights reserved.
+
+Fischost.Secrets is proprietary software. Use, copying, modification and distribution are permitted only
+under a written agreement with Fischost Solutions.

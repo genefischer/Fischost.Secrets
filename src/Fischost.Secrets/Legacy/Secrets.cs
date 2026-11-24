@@ -7,6 +7,7 @@ namespace Fischost.Secrets
     /// <summary>
     /// Super-light helper to read secrets from Azure Key Vault with minimal wiring.
     /// </summary>
+    [Obsolete("Use AddFischostSecrets; see README")]
     public static class Secrets
     {
         private static SecretClient? _client;
@@ -82,11 +83,15 @@ namespace Fischost.Secrets
         }
 
         /// <summary>
-        /// Try to get a secret value by name; returns false if missing.
+        /// Try to get a secret value by name; returns false if missing or if Secrets is not initialized.
         /// </summary>
         public static bool TryGet(string name, out string? value)
         {
-            EnsureInitialized();
+            if (_client is null)
+            {
+                value = null;
+                return false;
+            }
             try
             {
                 var resp = _client!.GetSecret(name);
